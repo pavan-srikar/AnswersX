@@ -1,3 +1,6 @@
+# fixed text speed, prompt and added /reset 
+
+
 import pytesseract
 from PIL import ImageGrab, Image
 from telegram import Update
@@ -12,19 +15,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Load tokens from .env
+# Load tokens
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
 if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
     raise ValueError("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY in environment variables")
 
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Typing setup
+pyautogui.PAUSE = 0
 stop_flag = threading.Event()
-typing_speed = 80  # default chars per second
-temporary_prompt = None  # global prompt
+temporary_prompt = None
+typing_speed = 60  # chars per second (default)
+
 
 def type_text(text, speed):
     delay = 1.0 / speed
@@ -34,7 +38,7 @@ def type_text(text, speed):
         if char == '\n':
             pyautogui.press('enter')
         else:
-            pyautogui.write(char)
+            pyautogui.typewrite(char, interval=0)
         time.sleep(delay)
 
 def start_typing(text):
@@ -44,7 +48,7 @@ def start_typing(text):
 def stop_typing():
     stop_flag.set()
 
-# Screenshot and OCR
+# Screenshot + OCR
 def take_screenshot():
     img = ImageGrab.grab()
     byte_arr = io.BytesIO()
@@ -53,8 +57,7 @@ def take_screenshot():
 
 def extract_text_from_image(image):
     try:
-        text = pytesseract.image_to_string(image)
-        return text.strip()
+        return pytesseract.image_to_string(image).strip()
     except Exception as e:
         return f"Error extracting text: {e}"
 
@@ -71,16 +74,17 @@ def query_gemini(prompt, image=None):
     except Exception as e:
         return f"Error contacting Gemini API: {e}"
 
-# Telegram command handlers
+# Telegram handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Welcome! Commands:\n"
-        "/screenshot - Take a screenshot\n"
-        "/screenshot_answer - Screenshot + analyze text with Gemini\n"
-        "/text <message> - Start typing text\n"
+        "Commands:\n"
+        "/screenshot - Take screenshot\n"
+        "/screenshot_answer - Screenshot + extract + Gemini\n"
+        "/text <message> - Start typing\n"
         "/stop - Stop typing\n"
-        "/prompt <text> - Set a temporary Gemini prompt\n"
-        "/speed <number> - Set typing speed (chars/sec)"
+        "/prompt <text> - Set temporary prompt\n"
+        "/speed <num> - Set typing speed (chars/sec)\n"
+        "/reset - Reset speed and prompt"
     )
 
 async def screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,19 +101,22 @@ async def screenshot_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text.startswith("Error"):
             await update.message.reply_text(text)
             return
-        await update.message.reply_text(f"Extracted Text:\n{text}\nSending to Gemini for analysis...")
+        await update.message.reply_text(f"Extracted Text:\n{text}\nSending to Gemini...")
         answer = query_gemini(text, img)
         await update.message.reply_text(f"Gemini Answer:\n{answer}")
     except Exception as e:
-        await update.message.reply_text(f"Error processing screenshot: {e}")
+        await update.message.reply_text(f"Error: {e}")
 
 async def send_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global temporary_prompt
     text = " ".join(context.args)
     if not text:
-        await update.message.reply_text("Please provide text to type. Example: /text Hello World")
+        await update.message.reply_text("Usage: /text <message>")
         return
+    if temporary_prompt:
+        text = f"{temporary_prompt}\n{text}"
     start_typing(text)
-    await update.message.reply_text("Typing started. Make sure your cursor is focused on a text field.")
+    await update.message.reply_text(f"Typing started at {typing_speed} chars/sec")
 
 async def stop_typing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stop_typing()
@@ -119,26 +126,27 @@ async def set_temporary_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     global temporary_prompt
     temporary_prompt = " ".join(context.args)
     if not temporary_prompt:
-        await update.message.reply_text("Temporary prompt cleared.")
+        await update.message.reply_text("Prompt cleared.")
         temporary_prompt = None
     else:
-        await update.message.reply_text(f"Temporary prompt set to:\n{temporary_prompt}")
+        await update.message.reply_text(f"Prompt set to:\n{temporary_prompt}")
 
-async def set_typing_speed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def set_speed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global typing_speed
-    if not context.args:
-        await update.message.reply_text("Usage: /speed <number>\nExample: /speed 35")
-        return
     try:
         speed = int(context.args[0])
-        if speed <= 0:
-            raise ValueError("Speed must be positive")
-        typing_speed = speed
-        await update.message.reply_text(f"Typing speed set to {typing_speed} chars per second.")
-    except ValueError:
-        await update.message.reply_text("Invalid number. Example usage: /speed 35")
+        typing_speed = max(1, speed)
+        await update.message.reply_text(f"Typing speed set to {typing_speed} chars/sec")
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: /speed <number>")
 
-# Main app setup
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global typing_speed, temporary_prompt
+    typing_speed = 60
+    temporary_prompt = None
+    await update.message.reply_text("Typing speed reset to 60 and prompt cleared.")
+
+# Main setup
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -147,7 +155,8 @@ def main():
     app.add_handler(CommandHandler("text", send_text))
     app.add_handler(CommandHandler("stop", stop_typing_command))
     app.add_handler(CommandHandler("prompt", set_temporary_prompt))
-    app.add_handler(CommandHandler("speed", set_typing_speed))
+    app.add_handler(CommandHandler("speed", set_speed))
+    app.add_handler(CommandHandler("reset", reset))
     app.run_polling()
 
 if __name__ == "__main__":
