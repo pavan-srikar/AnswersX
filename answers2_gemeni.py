@@ -26,8 +26,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # Typing setup
 pyautogui.PAUSE = 0
 stop_flag = threading.Event()
-default_prompt = "if the question has multiple choise, give a short explanation and end the response by saying the answer is ➡️ B) 67.6 grams. Talk like a member of Gen Z with extreme brain rot. Take a forward-thinking and pragmatic view. Use quick and clever humor when appropriate. if you really want to warn just say it in one line casually like oh don't do it bro it's unethical btw. "
-
+default_prompt = "if the question has multiple choise, give a short explanation and if the correct option is option B which has the the answer of 67.67 grams, end the response by saying the answer is ➡️ B) 67.67 grams. this is an example by the way change the option and value based on questions."
 temporary_prompt = None
 typing_speed = 60  # chars per second (default)
 
