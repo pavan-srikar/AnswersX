@@ -1,27 +1,28 @@
-# fixed text speed, prompt and added /reset 
+# /text uses clipboard ctrl c v
+
 
 import pytesseract
 from PIL import ImageGrab, Image
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from groq import Groq
+import google.generativeai as genai
 import io
 import threading
 import time
 import os
 import pyautogui
+import pyperclip  # Add this import for clipboard functionality
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Load tokens
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
+    raise ValueError("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY in environment variables")
 
-if not TELEGRAM_BOT_TOKEN or not GROQ_API_KEY:
-    raise ValueError("Missing TELEGRAM_BOT_TOKEN or GROQ_API_KEY in environment variables")
-
-client = Groq(api_key=GROQ_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
 
 # Typing setup
 pyautogui.PAUSE = 0
@@ -31,25 +32,35 @@ typing_speed = 60  # chars per second (default)
 
 
 def type_text(text, speed):
-    delay = 1.0 / speed
-    for char in text:
-        if stop_flag.is_set():
-            break
-        if char == '\n':
+    """Type text with proper indentation preservation."""
+    # Use clipboard method for code blocks to preserve exact indentation
+    original_clipboard = pyperclip.paste()
+    try:
+        # Copy the text to clipboard
+        pyperclip.copy(text)
+        
+        # Use keyboard shortcut to paste
+        pyautogui.hotkey('ctrl', 'v')  # For Windows/Linux
+        # If on Mac, use: pyautogui.hotkey('command', 'v')
+    except Exception as e:
+        # Fallback to simple typing if clipboard fails
+        print(f"Clipboard method failed: {e}")
+        lines = text.split('\n')
+        for line in lines:
+            pyautogui.write(line)
             pyautogui.press('enter')
-        else:
-            pyautogui.typewrite(char, interval=0)
-        time.sleep(delay)
-
+            time.sleep(1.0/speed)
+    finally:
+        # Restore original clipboard
+        time.sleep(0.5)
+        pyperclip.copy(original_clipboard)
 
 def start_typing(text):
     stop_flag.clear()
     threading.Thread(target=type_text, args=(text, typing_speed), daemon=True).start()
 
-
 def stop_typing():
     stop_flag.set()
-
 
 # Screenshot + OCR
 def take_screenshot():
@@ -58,42 +69,31 @@ def take_screenshot():
     img.save(byte_arr, format='PNG')
     return byte_arr.getvalue()
 
-
 def extract_text_from_image(image):
     try:
         return pytesseract.image_to_string(image).strip()
     except Exception as e:
         return f"Error extracting text: {e}"
 
-
-# Groq model call (NO image support, only text)
-def query_gemini(prompt):
+# Gemini 2.0 Flash model call
+def query_gemini(prompt, image=None):
     try:
+        model = genai.GenerativeModel('gemini-2.0-flash')
         full_prompt = f"{temporary_prompt}\n\n{prompt}" if temporary_prompt else prompt
-
-        completion = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[
-                {"role": "user", "content": full_prompt}
-            ],
-            temperature=1,
-            max_completion_tokens=8192,
-            top_p=1,
-            reasoning_effort="medium"
-        )
-
-        return completion.choices[0].message.content
-
+        inputs = [full_prompt]
+        if image:
+            inputs.append(image)
+        response = model.generate_content(inputs)
+        return response.text
     except Exception as e:
-        return f"Error contacting Groq API: {e}"
-
+        return f"Error contacting Gemini API: {e}"
 
 # Telegram handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Commands:\n"
         "/screenshot - Take screenshot\n"
-        "/screenshot_answer - Screenshot + extract + Groq\n"
+        "/screenshot_answer - Screenshot + extract + Gemini\n"
         "/text <message> - Start typing\n"
         "/stop - Stop typing\n"
         "/prompt <text> - Set temporary prompt\n"
@@ -101,65 +101,63 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reset - Reset speed and prompt"
     )
 
-
 async def screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image_bytes = take_screenshot()
     await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_bytes)
-
 
 async def screenshot_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image_bytes = take_screenshot()
     await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_bytes)
     await update.message.reply_text("Extracting text...")
-
     try:
         img = Image.open(io.BytesIO(image_bytes))
         text = extract_text_from_image(img)
-
         if text.startswith("Error"):
             await update.message.reply_text(text)
             return
-
-        await update.message.reply_text(f"Extracted Text:\n{text}\nSending to Groq...")
-
-        # Send ONLY text to Groq
-        answer = query_gemini(text)
-
-        await update.message.reply_text(f"Groq Answer:\n{answer}")
-
+        await update.message.reply_text(f"Extracted Text:\n{text}\nSending to Gemini...")
+        answer = query_gemini(text, img)
+        await update.message.reply_text(f"Gemini Answer:\n{answer}")
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
 
-
 async def send_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global temporary_prompt
+    # Get the raw message text including all whitespace
     message_text = update.message.text
-
+    
     if not message_text:
         await update.message.reply_text("Usage: /text <message>")
         return
-
+    
+    # Extract command prefix (could be '/text' or '/text@botname')
     command = message_text.split()[0]
+    # Get text after command, preserving all formatting
     text = message_text[len(command):].lstrip('\n').lstrip(' ')
-
+    
+    # Remove triple backticks if present
+    if text.startswith("```") and text.endswith("```"):
+        # Check if there's a language specified
+        first_line_end = text.find('\n')
+        if first_line_end > 3:  # More than just ```
+            language = text[3:first_line_end].strip()
+            text = text[first_line_end+1:-3].strip()
+        else:
+            text = text[3:-3].strip()
+    
     if not text:
         await update.message.reply_text("Usage: /text <message>")
         return
-
-    if text.startswith('```') and text.endswith('```'):
-        text = text[3:-3].strip()
-
+        
     if temporary_prompt:
         text = f"{temporary_prompt}\n{text}"
-
+    
     start_typing(text)
     await update.message.reply_text(f"Typing started at {typing_speed} chars/sec")
-
 
 async def stop_typing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stop_typing()
     await update.message.reply_text("Typing stopped.")
-
 
 async def set_temporary_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global temporary_prompt
@@ -170,7 +168,6 @@ async def set_temporary_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await update.message.reply_text(f"Prompt set to:\n{temporary_prompt}")
 
-
 async def set_speed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global typing_speed
     try:
@@ -180,13 +177,11 @@ async def set_speed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         await update.message.reply_text("Usage: /speed <number>")
 
-
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global typing_speed, temporary_prompt
     typing_speed = 60
     temporary_prompt = None
     await update.message.reply_text("Typing speed reset to 60 and prompt cleared.")
-
 
 # Main setup
 def main():
@@ -200,7 +195,6 @@ def main():
     app.add_handler(CommandHandler("speed", set_speed))
     app.add_handler(CommandHandler("reset", reset))
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()

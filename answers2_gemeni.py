@@ -5,7 +5,7 @@ import pytesseract
 from PIL import ImageGrab, Image
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-import google.generativeai as genai
+import google.genai as genai
 import io
 import threading
 import time
@@ -21,16 +21,19 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
     raise ValueError("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY in environment variables")
 
-genai.configure(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Typing setup
 pyautogui.PAUSE = 0
 stop_flag = threading.Event()
+default_prompt = "if the question has multiple choise, give a short explanation and end the response by saying the answer is ➡️ B) 67.6 grams. Talk like a member of Gen Z with extreme brain rot. Take a forward-thinking and pragmatic view. Use quick and clever humor when appropriate. if you really want to warn just say it in one line casually like oh don't do it bro it's unethical btw. "
+
 temporary_prompt = None
 typing_speed = 60  # chars per second (default)
 
 
 def type_text(text, speed):
+    time.sleep(2)
     delay = 1.0 / speed
     for char in text:
         if stop_flag.is_set():
@@ -63,16 +66,27 @@ def extract_text_from_image(image):
 
 # Gemini 2.0 Flash model call
 def query_gemini(prompt, image=None):
-    try:
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        full_prompt = f"{temporary_prompt}\n\n{prompt}" if temporary_prompt else prompt
-        inputs = [full_prompt]
-        if image:
-            inputs.append(image)
-        response = model.generate_content(inputs)
-        return response.text
-    except Exception as e:
-        return f"Error contacting Gemini API: {e}"
+    # List of models to try in order of preference
+    models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash']
+    
+    active_prompt = temporary_prompt if temporary_prompt else default_prompt
+    full_prompt = f"{active_prompt}\n\n{prompt}"
+    content = [full_prompt, image] if image else full_prompt
+
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=content
+            )
+            return response.text
+        except Exception as e:
+            if "503" in str(e) or "429" in str(e):
+                print(f"Model {model_name} busy, trying next...")
+                continue # Try the next model in the list
+            return f"Error: {e}"
+            
+    return "Nigga all Gemini models are currently overloaded for free plan. If your broke ass can't afford paid plan, try again in a minute."
 
 # Telegram handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -82,7 +96,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/screenshot_answer - Screenshot + extract + Gemini\n"
         "/text <message> - Start typing\n"
         "/stop - Stop typing\n"
-        "/prompt <text> - Set temporary prompt\n"
+        "/prompt <text> - default prompt is always active unless overridden \n"
         "/speed <num> - Set typing speed (chars/sec)\n"
         "/reset - Reset speed and prompt"
     )
@@ -109,12 +123,22 @@ async def screenshot_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global temporary_prompt
-    text = " ".join(context.args)
+    # Extract full message text including newlines
+    if not (message_text := update.message.text):
+        await update.message.reply_text("Usage: /text <message>")
+        return
+    
+    # Remove command while preserving formatting
+    command = message_text.split()[0]  # Get the first word (/text or /text@botname)
+    text = message_text[len(command):].lstrip()
+    
     if not text:
         await update.message.reply_text("Usage: /text <message>")
         return
+        
     if temporary_prompt:
         text = f"{temporary_prompt}\n{text}"
+    
     start_typing(text)
     await update.message.reply_text(f"Typing started at {typing_speed} chars/sec")
 
@@ -144,7 +168,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global typing_speed, temporary_prompt
     typing_speed = 60
     temporary_prompt = None
-    await update.message.reply_text("Typing speed reset to 60 and prompt cleared.")
+    await update.message.reply_text("Reset done. Back to default prompt + 60 cps speed.")
 
 # Main setup
 def main():
